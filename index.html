@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Combo – compañero virtual con IA</title>
+<script type="importmap">{"imports":{
+"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+"three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+"@elevenlabs/client":"https://cdn.jsdelivr.net/npm/@elevenlabs/client@0.7.0/+esm"}}</script>
+<style>
+:root{--ink:#3b2417;--sun:#ffe3c4;--peach:#ffc9a3;--btn:#ff7a1a;--soft:#fff6ee}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{font:16px/1.4 "Trebuchet MS",system-ui,sans-serif;color:var(--ink);background:radial-gradient(120% 90% at 50% 20%,var(--sun),var(--peach));overflow:hidden;display:flex;flex-direction:column}
+canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none}
+header,main,footer{position:relative;z-index:1;pointer-events:none}
+header{padding:calc(10px + env(safe-area-inset-top)) 14px 0}
+h1{margin:0;font-size:1.5rem}.note{font-size:.8rem;background:#fff8;border-radius:10px;padding:6px 10px;display:inline-block;pointer-events:auto}
+main{flex:1}
+footer{padding:8px 12px calc(10px + env(safe-area-inset-bottom));display:grid;gap:8px;max-width:640px;width:100%;margin:auto auto 0}
+footer>*{pointer-events:auto}
+#log{max-height:22vh;overflow:auto;background:#fffc;border-radius:12px;padding:8px 10px;font-size:.9rem}
+#log p{margin:2px 0}.u{opacity:.7}
+.row{display:flex;gap:6px;flex-wrap:wrap}
+button,input,textarea{font:inherit;border-radius:12px;border:2px solid #0000;padding:10px 12px;min-height:44px}
+button{background:var(--btn);color:#fff;cursor:pointer}button.alt{background:#fff;color:var(--ink);border-color:#e9c6a9}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid #6a3de8}
+input[type=text]{flex:1;min-width:0;background:#fff}
+#src{font-size:.85rem;background:#fffc;border-radius:12px;padding:6px 10px}#src:empty{display:none}#src a{display:block;color:#5a2fc2;overflow-wrap:anywhere}#status{font-size:.85rem}#mic{display:none;color:#c0182b;font-weight:700}
+dialog{border:0;border-radius:16px;max-width:420px;background:var(--soft);color:var(--ink)}
+details{background:#fffc;border-radius:12px;padding:6px 10px}textarea{width:100%;background:#fff}
+@media (min-width:900px){canvas{width:calc(100% - 380px)}
+footer{position:absolute;top:0;right:0;bottom:0;width:380px;max-width:none;margin:0;padding:calc(12px + env(safe-area-inset-top)) 14px 14px;background:#fffa;backdrop-filter:blur(8px);border-left:1px solid #0001;overflow:auto;display:flex;flex-direction:column;gap:8px}
+#log{flex:1;max-height:none;min-height:120px}
+header{padding-right:394px}}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+</style></head><body>
+<canvas id="c" aria-label="Combo en 3D. Arrastrá para girarlo."></canvas>
+<header><h1>Combo</h1><span class="note">Combo es un personaje virtual impulsado por inteligencia artificial, no una persona.</span></header>
+<main></main>
+<footer>
+<div id="log" aria-live="polite"></div>
+<div id="src" aria-live="polite"></div>
+<div id="status">Listo. <span id="mic">● Micrófono activo</span></div>
+<form class="row" id="f"><input type="text" id="t" placeholder="Escribile a Combo…" aria-label="Mensaje"><button>Enviar</button></form>
+<div class="row"><button id="talk">Hablar con voz</button><button class="alt" id="text">Sin micrófono</button><button class="alt" id="end">Terminar</button></div>
+<div class="row" id="ex"></div>
+<details><summary>Memoria opcional y privacidad</summary>
+<label><input type="checkbox" id="cons"> Guardar mis preferencias en este navegador</label>
+<textarea id="prefs" rows="2" placeholder="Ej.: me gusta el folklore; prefiero respuestas cortas" disabled></textarea>
+<div class="row"><button class="alt" id="save">Guardar</button><button class="alt" id="wipe">Borrar todo lo guardado</button></div>
+<p class="note">Nada se guarda sin tu permiso. Se envía a Combo solo al iniciar una charla.</p></details>
+</footer>
+<dialog id="dlg"><form method="dialog"><p><b>Antes de usar el micrófono</b></p>
+<p>Tu voz se envía en vivo a ElevenLabs y al proveedor del modelo de lenguaje de Combo para generar las respuestas. Combo es una IA y puede equivocarse: verificá lo importante. El aviso rojo indica cuándo el micrófono está activo.</p>
+<div class="row"><button value="ok">Acepto</button><button class="alt" value="no">Cancelar</button></div></form></dialog>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import {Conversation} from '@elevenlabs/client';
+
+const CFG = {agentId:'agent_9701m4v8fpc2fcw87m3pm3j0pe65', signedUrlEndpoint:'', sourcesEndpoint:''}; // endpoints del Worker: ver worker/ y README
+const $=id=>document.getElementById(id), clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x));
+
+// ---------- escena ----------
+const cv=$('c'), R=new THREE.WebGLRenderer({canvas:cv,antialias:true,alpha:true});
+R.shadowMap.enabled=true;R.shadowMap.type=THREE.PCFSoftShadowMap;R.toneMapping=THREE.ACESFilmicToneMapping;
+const S=new THREE.Scene(), cam=new THREE.PerspectiveCamera(35,1,.1,50);cam.position.set(0,1.5,5.4);
+S.environment=new THREE.PMREMGenerator(R).fromScene(new RoomEnvironment(),.04).texture;
+S.add(new THREE.HemisphereLight(0xfff0e0,0xffc9a3,.8));
+const sun=new THREE.DirectionalLight(0xfff2e0,2);sun.position.set(2,4,3);sun.castShadow=true;sun.shadow.mapSize.set(1024,1024);sun.shadow.radius=6;S.add(sun);
+const rim=new THREE.DirectionalLight(0xffb0e0,1);rim.position.set(-3,2,-2);S.add(rim);
+const floor=new THREE.Mesh(new THREE.CircleGeometry(4,48),new THREE.ShadowMaterial({opacity:.22}));floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;S.add(floor);
+const ctl=new OrbitControls(cam,cv);ctl.target.set(0,1,0);ctl.enablePan=false;ctl.enableDamping=true;ctl.minDistance=3;ctl.maxDistance=8;ctl.maxPolarAngle=Math.PI*.58;
+
+// ---------- personaje ----------
+const pearl=new THREE.MeshPhysicalMaterial({color:0xfff9fc,roughness:.2,clearcoat:1,clearcoatRoughness:.1,iridescence:1,iridescenceIOR:1.6,iridescenceThicknessRange:[250,650],sheen:.6,sheenColor:new THREE.Color(0xffc8ec)});
+const M=(g,m=pearl)=>{const o=new THREE.Mesh(g,m);o.castShadow=true;return o};
+const SP=(r)=>new THREE.SphereGeometry(r,48,32);
+const root=new THREE.Group();S.add(root);
+const body=M(SP(.55));body.scale.set(1,.95,.9);body.position.y=.6;root.add(body);
+const head=new THREE.Group();head.position.y=1.55;root.add(head);
+const skull=M(SP(.86));skull.scale.set(1.02,.94,.97);head.add(skull);const plate=new THREE.Mesh(SP(1),new THREE.MeshPhysicalMaterial({color:0xfff7f0,roughness:.35,clearcoat:.6}));plate.scale.set(.72,.6,.3);plate.position.set(0,-.02,.62);plate.castShadow=true;head.add(plate);
+const tube=new THREE.TubeGeometry(new THREE.CatmullRomCurve3([new THREE.Vector3(0,.72,0),new THREE.Vector3(.04,.95,0),new THREE.Vector3(.2,1.12,0),new THREE.Vector3(.36,1.1,0)]),24,.045,10);
+head.add(M(tube));const bulb=M(SP(.17));bulb.scale.set(1.5,.8,.8);bulb.position.set(.5,1.1,0);bulb.rotation.z=.1;head.add(bulb);
+const arm=s=>{const p=new THREE.Group();p.position.set(s*.56,.85,0);const a=M(new THREE.CapsuleGeometry(.11,.3,8,16));a.position.y=-.2;p.add(a);const hd=M(SP(.13));hd.position.y=-.5;hd.scale.set(1,1.1,.8);p.add(hd);root.add(p);return p};
+const armL=arm(-1),armR=arm(1);
+[-1,1].forEach(s=>{const f=M(SP(.2));f.scale.set(1.1,.6,1.4);f.position.set(s*.25,.1,.12);root.add(f)});
+const eyeMat=new THREE.MeshPhysicalMaterial({color:0x2b160e,roughness:.15,clearcoat:1});
+const eyes=[-1,1].map(s=>{const g=new THREE.Group();g.position.set(s*.28,-.02,.87);const e=new THREE.Mesh(SP(.19),new THREE.MeshPhysicalMaterial({color:0xfffaf5,roughness:.25,clearcoat:1}));e.scale.set(1,1.05,.5);g.add(e);const ir=new THREE.Mesh(SP(.145),new THREE.MeshPhysicalMaterial({color:0x8a4e24,roughness:.2,clearcoat:1}));ir.scale.set(1,1,.35);ir.position.set(0,-.01,.07);g.add(ir);const pu=new THREE.Mesh(SP(.07),eyeMat);pu.position.set(0,-.01,.1);pu.scale.z=.4;g.add(pu);
+ const h=new THREE.Mesh(SP(.045),new THREE.MeshBasicMaterial({color:0xffffff}));h.position.set(-.06*s,.06,.17);g.add(h);
+ const h2=new THREE.Mesh(SP(.022),h.material);h2.position.set(.06*s,-.05,.16);g.add(h2);head.add(g);return g});
+const browMat=new THREE.MeshStandardMaterial({color:0x4a2a22});
+const brows=[-1,1].map(s=>{const b=new THREE.Mesh(new THREE.CapsuleGeometry(.022,.15,4,8),browMat);b.rotation.z=Math.PI/2;const g=new THREE.Group();g.position.set(s*.3,.2,.88);g.add(b);head.add(g);return g});
+const cheeks=[-1,1].map(s=>{const c=new THREE.Mesh(SP(.1),new THREE.MeshBasicMaterial({color:0xff8fb0,transparent:true,opacity:.55}));c.scale.set(1.3,.8,.2);c.position.set(s*.5,-.22,.8);head.add(c);return c});
+const mouth=new THREE.Group();mouth.position.set(0,-.3,.86);head.add(mouth);
+const cav=new THREE.Mesh(SP(.1),new THREE.MeshStandardMaterial({color:0xc94a63,roughness:.5}));mouth.add(cav);
+const teeth=new THREE.Mesh(new THREE.BoxGeometry(.16,.03,.02),new THREE.MeshStandardMaterial({color:0xffffff}));mouth.add(teeth);
+const tongue=new THREE.Mesh(SP(.05),new THREE.MeshStandardMaterial({color:0xff8aa0}));tongue.scale.set(1.4,.6,.5);mouth.add(tongue);
+const smile=new THREE.Mesh(new THREE.TorusGeometry(.12,.012,8,24,Math.PI),new THREE.MeshStandardMaterial({color:0x5a1f2b}));smile.rotation.z=Math.PI;mouth.add(smile);
+
+// ---------- expresiones ----------
+const EX={ // brow, tilt(+ = enojo, - = tristeza), eye, smile(-1..1), open, round, cheek, asym
+ neutro:{brow:0,tilt:0,eye:1,smile:.5,open:0,round:0,cheek:.8,asym:0},
+ alegria:{brow:.3,tilt:-.1,eye:1.05,smile:1,open:.12,round:0,cheek:1.3,asym:0},
+ sorpresa:{brow:1,tilt:0,eye:1.2,smile:0,open:.6,round:.9,cheek:.7,asym:0},
+ curiosidad:{brow:.5,tilt:0,eye:1.1,smile:.3,open:.04,round:.2,cheek:.8,asym:.7},
+ confusion:{brow:.2,tilt:.25,eye:1,smile:-.2,open:.02,round:0,cheek:.6,asym:1},
+ concentracion:{brow:-.4,tilt:.5,eye:.82,smile:0,open:0,round:0,cheek:.5,asym:0},
+ tristeza:{brow:.3,tilt:-.6,eye:1,smile:-.6,open:0,round:0,cheek:.4,asym:0}};
+const cur={...EX.neutro},tgt={...EX.neutro};let exp='neutro',expUntil=0;
+const setExp=(n,sec=0)=>{exp=n;Object.assign(tgt,EX[n]);expUntil=sec?performance.now()+sec*1000:0};
+const viseme={open:0,round:0,wide:0,teeth:0};
+let searching=false,blink=0,nextBlink=2,jumpT=-1,spinT=-1,waveT=-1,speaking=false,conv=null;
+const clock=new THREE.Clock(),ph=Math.random()*9;
+
+// ---------- sincronía labial (aproximada por espectro; ver README) ----------
+function lip(dt){
+ let o=0,r=0,w=0;
+ if(conv&&speaking){const vol=conv.getOutputVolume(),f=conv.getOutputByteFrequencyData(),n=f.length||1;
+  const avg=(a,b)=>{let s=0,c=0;for(let i=Math.floor(n*a);i<Math.ceil(n*b);i++){s+=f[i];c++}return c?s/c/255:0};
+  const lo=avg(0,.06),mid=avg(.06,.15),hi=avg(.15,.4),tot=lo+mid+hi+1e-3;
+  if(vol<.035){o=0}else{ // silencio breve entre sílabas = labios juntos (M/B/P)
+   o=clamp(vol*2.4);const hr=hi/tot,lr=lo/tot;
+   if(hr>.28){w=.9;o*=.55}        // E / I: boca ancha, poco abierta
+   else if(lr>.55){r=.9;o*=.7}    // O / U: boca redonda
+   else{w=.35}}                   // A: boca abierta
+ }
+ const k=1-Math.exp(-dt*22);viseme.open+=(o-viseme.open)*k;viseme.round+=(r-viseme.round)*k;viseme.wide+=(w-viseme.wide)*k;
+}
+function easeTo(dt){const k=1-Math.exp(-dt*9);for(const p in tgt)cur[p]+=(tgt[p]-cur[p])*k}
+
+function tick(){
+ const dt=Math.min(clock.getDelta(),.05),t=clock.elapsedTime;
+ if(expUntil&&performance.now()>expUntil){setExp('neutro')}
+ easeTo(dt);lip(dt);
+ // parpadeo
+ nextBlink-=dt;if(nextBlink<0){blink=1;nextBlink=1.8+Math.random()*3.5;if(Math.random()<.2)nextBlink=.25}
+ blink=Math.max(0,blink-dt*7);const bl=blink>0?Math.abs(Math.sin(blink*Math.PI)):0;
+ eyes.forEach((e,i)=>{const s=cur.eye;e.scale.set(s,s*(1-.92*bl),s);e.position.y=-.02+(cur.brow>.8?.02:0)});
+ brows.forEach((b,i)=>{const s=i?1:-1,asy=i?cur.asym:0;b.position.y=.2+.1*cur.brow+.08*asy;b.rotation.z=s*-cur.tilt*.5+(asy?.25*asy:0)});
+ cheeks.forEach(c=>c.scale.x=1.3*cur.cheek);
+ // boca = expresión + visema
+ const open=clamp(cur.open+viseme.open),round=clamp(cur.round+viseme.round),wide=viseme.wide;
+ cav.scale.set(1.1+wide*.9-round*.45+.3,.15+open*1.4,.4);cav.visible=open>.07;
+ teeth.visible=cav.visible&&(wide>.5||cur.smile>.8)&&open>.12;teeth.position.y=cav.scale.y*.07;
+ tongue.visible=cav.visible&&open>.3;tongue.position.y=-cav.scale.y*.05;
+ smile.visible=!cav.visible;smile.scale.y=cur.smile*1.1||.01;smile.position.y=cur.smile<0?-.02:.05;
+ // cuerpo
+ const br=Math.sin(t*1.6+ph)*.012;body.scale.set(1+br,.95-br,.9+br);
+ head.rotation.set(Math.sin(t*.7+ph)*.05+(speaking?Math.sin(t*5)*.03*viseme.open:0),Math.sin(t*.45+ph*2)*.12,Math.sin(t*.55)*.04+cur.asym*.08);
+ head.position.y=1.55+br*2;if(searching){head.rotation.z+=.1*Math.sin(t*3);head.rotation.x-=.12;bulb.scale.x=1.5+.25*Math.sin(t*9)}else bulb.scale.x=1.5;
+ let y=0;if(jumpT>=0){jumpT+=dt;const u=jumpT/.6;y=u<1?Math.sin(u*Math.PI)*.5:0;if(u>=1)jumpT=-1}
+ root.position.y=y;
+ if(spinT>=0){spinT+=dt;root.rotation.y=Math.min(1,spinT/.9)*Math.PI*2;if(spinT>.9){spinT=-1;root.rotation.y=0}}
+ armL.rotation.z=.25+Math.sin(t*1.3)*.04;
+ if(waveT>=0){waveT+=dt;armR.rotation.z=-2.3+Math.sin(waveT*12)*.35;if(waveT>1.6){waveT=-1}}else armR.rotation.z=-.25-Math.sin(t*1.3+1)*.04;
+ ctl.update();R.render(S,cam);requestAnimationFrame(tick);
+}
+function fit(){const w=cv.clientWidth||innerWidth,h=cv.clientHeight||innerHeight;R.setPixelRatio(Math.min(devicePixelRatio,2));R.setSize(w,h,false);cam.aspect=w/h;cam.position.z=w/h<.8?7.2:5.4;cam.updateProjectionMatrix()}
+addEventListener('resize',fit);fit();tick();
+
+// ---------- reacciones ----------
+const act={saludar:()=>{waveT=0;setExp('alegria',2)},saltar:()=>{jumpT=0;setExp('alegria',1.5)},girar:()=>{spinT=0;setExp('sorpresa',1.2)}};
+const ex=$('ex');[['Saludar','saludar'],['Saltar','saltar'],['Girar','girar'],['Alegría','alegria'],['Sorpresa','sorpresa'],['Curiosidad','curiosidad'],['Confusión','confusion'],['Concentración','concentracion'],['Tristeza leve','tristeza']].forEach(([l,k])=>{
+ const b=document.createElement('button');b.className='alt';b.type='button';b.textContent=l;b.onclick=()=>act[k]?act[k]():setExp(k,3);ex.append(b)});
+setTimeout(act.saludar,600);
+
+// ---------- memoria opcional ----------
+const K={c:'combo.consent',p:'combo.prefs'};
+const cons=$('cons'),prefs=$('prefs');
+const load=()=>{try{cons.checked=localStorage.getItem(K.c)==='1';prefs.disabled=!cons.checked;prefs.value=cons.checked?localStorage.getItem(K.p)||'':''}catch{}};
+cons.onchange=()=>{try{if(cons.checked)localStorage.setItem(K.c,'1');else{localStorage.removeItem(K.c);localStorage.removeItem(K.p);prefs.value=''}prefs.disabled=!cons.checked}catch{}};
+$('save').onclick=()=>{if(cons.checked)try{localStorage.setItem(K.p,prefs.value.slice(0,500));say('Combo','Guardé tus preferencias en este navegador.')}catch{}};
+$('wipe').onclick=()=>{try{localStorage.removeItem(K.c);localStorage.removeItem(K.p)}catch{}cons.checked=false;prefs.value='';prefs.disabled=true;say('Combo','Borré todo lo guardado.')};
+load();
+
+// ---------- conversación ----------
+const log=$('log'),status=t=>$('status').firstChild.textContent=t+' ';
+function say(who,txt){const p=document.createElement('p');p.className=who==='Tú'?'u':'';p.textContent=`${who}: ${txt}`;log.append(p);log.scrollTop=log.scrollHeight}
+// ---------- búsqueda web (Perplexity vía ElevenLabs) ----------
+const seen=new Set();
+function showSources(list){const box=$('src');box.textContent='';
+ if(list===null){box.textContent='No se pudieron cargar los enlaces de las fuentes.';return}
+ if(!list.length)return;
+ const h=document.createElement('b');h.textContent='Fuentes consultadas:';box.append(h);
+ list.slice(0,5).forEach(s=>{try{const u=new URL(s.url);if(u.protocol!=='https:'&&u.protocol!=='http:')return;
+  const a=document.createElement('a');a.href=u.href;a.target='_blank';a.rel='noopener noreferrer';a.textContent=String(s.title||u.hostname).slice(0,70);box.append(a)}catch{}})}
+async function fetchSources(q){try{const r=await fetch(CFG.sourcesEndpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q})});
+ if(!r.ok)throw new Error(r.status);showSources((await r.json()).results||[])}catch{showSources(null)}}
+function toolReq(e){const d=e&&(e.agent_tool_request||e);if(!d||!d.tool_name)return;const id='q'+d.tool_call_id;if(d.tool_call_id&&seen.has(id))return;seen.add(id);
+ searching=true;status('Buscando en la web…');setExp('concentracion',40);$('src').textContent='';
+ const p=d.parameters||{},q=p.query||p.question||p.q;if(q&&CFG.sourcesEndpoint)fetchSources(String(q))}
+function toolRes(e){const d=e&&(e.agent_tool_response||e);if(!d||!d.tool_name)return;const id='s'+d.tool_call_id;if(d.tool_call_id&&seen.has(id))return;seen.add(id);
+ searching=false;if(d.is_error){status('La búsqueda falló.');say('Aviso','No pude completar la búsqueda. Combo no va a inventar la respuesta.');setExp('confusion',3)}else{status('Información encontrada.');setExp('alegria',1.5)}}
+const dbg=e=>{const t=e&&e.type;if(t==='agent_tool_request')toolReq(e);else if(t==='agent_tool_response')toolRes(e)};
+
+async function start(textOnly){
+ if(conv)return;
+ if(!textOnly){const d=$('dlg');d.showModal();const ok=await new Promise(r=>d.addEventListener('close',()=>r(d.returnValue==='ok'),{once:true}));if(!ok)return}
+ status('Conectando…');
+ try{
+  const auth=CFG.signedUrlEndpoint?{signedUrl:(await (await fetch(CFG.signedUrlEndpoint)).json()).signedUrl}:{agentId:CFG.agentId};
+  conv=await Conversation.startSession({...auth,connectionType:'websocket',
+   ...(textOnly?{overrides:{conversation:{textOnly:true}}}:{}),
+   onConnect:()=>{status(textOnly?'Conectado (solo texto).':'Conectado.');$('mic').style.display=textOnly?'none':'inline';setExp('alegria',2)},
+   onDisconnect:()=>{conv=null;searching=false;speaking=false;$('mic').style.display='none';status('Charla terminada.');setExp('neutro')},
+   onError:e=>{say('Aviso','Hubo un error de conexión. Probá de nuevo.');console.error(e)},
+   onAgentToolRequest:toolReq,onAgentToolResponse:toolRes,onDebug:dbg,onModeChange:({mode})=>{speaking=mode==='speaking';if(!speaking&&!expUntil)setExp(mode==='listening'?'curiosidad':'neutro')},
+   onMessage:({message,source})=>{say(source==='user'?'Tú':'Combo',message);if(source==='ai'){if(/!/.test(message))setExp('alegria',2);if(/jaja|ja,/i.test(message))jumpT=0}else if(/\?/.test(message))setExp('curiosidad',2)}});
+  if(cons.checked&&prefs.value.trim())conv.sendContextualUpdate('Preferencias que la persona aceptó compartir: '+prefs.value.trim());
+ }catch(e){status('No se pudo conectar.');say('Aviso',textOnly?'No se pudo iniciar el modo texto.':'No se pudo acceder al micrófono o al agente.');console.error(e);conv=null}
+}
+$('talk').onclick=()=>start(false);$('text').onclick=()=>start(true);
+$('end').onclick=()=>conv&&conv.endSession();
+$('f').onsubmit=async e=>{e.preventDefault();const v=$('t').value.trim();if(!v)return;if(!conv)await start(true);if(conv){conv.sendUserMessage(v);say('Tú',v);$('t').value=''}};
+
+</script></body></html>
